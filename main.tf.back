@@ -2,6 +2,49 @@ provider "aws" {
   region = "us-west-2"
 }
 
+resource "aws_route53_zone" "domain" {
+  name = "owens-monitor.space"
+}
+
+output "nameservers" {
+  value = aws_route53_zone.domain.name_servers
+}
+
+data "aws_route53_zone" "domain" {
+  name = aws_route53_zone.domain.name
+}
+
+resource "aws_acm_certificate" "cert" {
+  domain_name       = "owens-monitor.space"
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_route53_record" "cert_validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.cert.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+
+  allow_overwrite = true
+  name            = each.value.name
+  records         = [each.value.record]
+  ttl             = 60
+  type            = each.value.type
+  zone_id         = data.aws_route53_zone.domain.zone_id
+}
+
+resource "aws_acm_certificate_validation" "cert_validation" {
+  certificate_arn         = aws_acm_certificate.cert.arn
+  validation_record_fqdns = [for record in aws_route53_record.cert_validation : record.fqdn]
+}
+
 resource "aws_vpc" "vpc1" {
   cidr_block = "10.0.0.0/16"
 }
@@ -9,37 +52,13 @@ resource "aws_vpc" "vpc1" {
 resource "aws_subnet" "subnet1" {
   vpc_id            = aws_vpc.vpc1.id
   cidr_block        = "10.0.1.0/24"
-  availability_zone = "us-west-2a"
+  availability_zone = "us-west-2b"
 }
 
 resource "aws_subnet" "subnet2" {
   vpc_id            = aws_vpc.vpc1.id
-  cidr_block        = "10.0.2.0/24"
-  availability_zone = "us-west-2b"
-}
-
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.vpc1.id
-}
-
-resource "aws_route_table" "rt" {
-  vpc_id = aws_vpc.vpc1.id
-}
-
-resource "aws_route" "internet_access" {
-  route_table_id         = aws_route_table.rt.id
-  destination_cidr_block = "0.0.0.0/0"
-  gateway_id             = aws_internet_gateway.igw.id
-}
-
-resource "aws_route_table_association" "a" {
-  subnet_id      = aws_subnet.subnet1.id
-  route_table_id = aws_route_table.rt.id
-}
-
-resource "aws_route_table_association" "b" {
-  subnet_id      = aws_subnet.subnet2.id
-  route_table_id = aws_route_table.rt.id
+  cidr_block        = "10.0.1.0/24"
+  availability_zone = "us-west-2a"
 }
 
 resource "aws_security_group" "security_group_uptime_kuma" {
@@ -55,25 +74,7 @@ resource "aws_security_group" "security_group_uptime_kuma" {
   egress {
     from_port   = 0
     to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-resource "aws_security_group" "security_group_alb" {
-  name   = "Security Group for ALB"
-  vpc_id = aws_vpc.vpc1.id
-
-  ingress {
-    from_port   = 80
-    to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
@@ -101,7 +102,7 @@ resource "aws_lb" "uptime_kuma_alb" {
   name               = "uptime-kuma-alb"
   internal           = false
   load_balancer_type = "application"
-  security_groups    = [aws_security_group.security_group_alb.id]
+  security_groups    = [aws_security_group.security_group_uptime_kuma.id]
   subnets            = [aws_subnet.subnet1.id, aws_subnet.subnet2.id]
 
   enable_deletion_protection = false
@@ -131,8 +132,10 @@ resource "aws_lb_target_group" "uptime_kuma_tg" {
 
 resource "aws_lb_listener" "uptime_kuma_listener" {
   load_balancer_arn = aws_lb.uptime_kuma_alb.arn
-  port              = 80
-  protocol          = "HTTP"
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-2016-08"
+  certificate_arn   = aws_acm_certificate.cert.arn
 
   default_action {
     type             = "forward"
@@ -141,7 +144,7 @@ resource "aws_lb_listener" "uptime_kuma_listener" {
 }
 
 resource "aws_ecs_cluster" "ecs_cluster" {
-  name = "uptime-kuma-cluster"
+  name = "my-cluster"
 }
 
 resource "aws_ecs_task_definition" "uptime_kuma" {
@@ -170,7 +173,7 @@ resource "aws_ecs_task_definition" "uptime_kuma" {
   container_definitions = jsonencode([
     {
       name      = "uptime-kuma",
-      image     = "louislam/uptime-kuma:latest",
+      image     = "louislam/uptime-kuma:1",
       cpu       = 256,
       memory    = 512,
       essential = true,
