@@ -170,7 +170,7 @@ resource "aws_ecs_task_definition" "uptime_kuma" {
   container_definitions = jsonencode([
     {
       name      = "uptime-kuma",
-      image     = "louislam/uptime-kuma:latest",
+      image     = "louislam/uptime-kuma:1",
       cpu       = 256,
       memory    = 512,
       essential = true,
@@ -183,13 +183,38 @@ resource "aws_ecs_task_definition" "uptime_kuma" {
       ],
       execute_command_configuration = {
         logging = "DEFAULT"
-      }
+      },
       mountPoints = [
         {
           sourceVolume  = "uptime-kuma-data"
           containerPath = "/app/data"
           readOnly      = false
-        },
+        }
+      ],
+      log_configuration = {
+        log_driver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.uptime_kuma_logs.name
+          "awslogs-region"        = "us-west-2"
+          "awslogs-stream-prefix" = "uptime-kuma"
+        }
+      }
+    },
+    {
+      name      = "efs-mount",
+      image = "602401143452.dkr.ecr.us-west-2.amazonaws.com/amazon-ecs-efs-mount-helper:latest",
+      essential = false,
+      mountPoints = [
+        {
+          sourceVolume  = "uptime-kuma-data",
+          containerPath = "/efs-mnt"
+        }
+      ],
+      environment = [
+        {
+          name  = "EFS_MOUNT_DIR",
+          value = "/efs-mnt"
+        }
       ]
     }
   ])
@@ -209,7 +234,7 @@ resource "aws_ecs_service" "uptime-kuma_service" {
 
   network_configuration {
     subnets          = [aws_subnet.subnet1.id]
-    assign_public_ip = false
+    assign_public_ip = true
     security_groups  = [aws_security_group.security_group_uptime_kuma.id]
   }
 
@@ -247,7 +272,35 @@ resource "aws_iam_role" "ecs_task_execution_role" {
   })
 }
 
+data "aws_iam_policy_document" "allow_ecr_pull" {
+  statement {
+    actions = [
+      "ecr:GetAuthorizationToken",
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:BatchGetImage",
+    ]
+    resources = [
+      "*"
+    ]
+  }
+}
+
+resource "aws_iam_policy" "allow_ecr_pull_policy" {
+  name   = "AllowEcrPull"
+  policy = data.aws_iam_policy_document.allow_ecr_pull.json
+}
+
+resource "aws_iam_role_policy_attachment" "allow_ecr_pull_attachment" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = aws_iam_policy.allow_ecr_pull_policy.arn
+}
+
 resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
   role       = aws_iam_role.ecs_task_execution_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_cloudwatch_log_group" "uptime_kuma_logs" {
+  name = "/ecs/uptime-kuma"
 }
